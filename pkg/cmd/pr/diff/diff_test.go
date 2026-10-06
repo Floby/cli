@@ -108,6 +108,26 @@ func Test_NewCmdDiff(t *testing.T) {
 			},
 		},
 		{
+			name:  "include single pattern",
+			args:  "--include '*.py'",
+			isTTY: true,
+			want: DiffOptions{
+				SelectorArg: "",
+				UseColor:    true,
+				Include:     []string{"*.py"},
+			},
+		},
+		{
+			name:  "include multiple patterns",
+			args:  "--include '*.py' --include '*.go'",
+			isTTY: true,
+			want: DiffOptions{
+				SelectorArg: "",
+				UseColor:    true,
+				Include:     []string{"*.py", "*.go"},
+			},
+		},
+		{
 			name:    "invalid --color argument",
 			args:    "--color doublerainbow",
 			isTTY:   true,
@@ -173,6 +193,7 @@ func Test_NewCmdDiff(t *testing.T) {
 			assert.Equal(t, tt.want.UseColor, opts.UseColor)
 			assert.Equal(t, tt.want.BrowserMode, opts.BrowserMode)
 			assert.Equal(t, tt.want.Exclude, opts.Exclude)
+			assert.Equal(t, tt.want.Include, opts.Include)
 			assert.Equal(t, tt.want.AllowEscapeSequences, opts.AllowEscapeSequences)
 		})
 	}
@@ -283,6 +304,49 @@ index f2b4805c..3d7bd0f9 100644
 			},
 			wantFields: []string{"number"},
 			wantStdout: "Makefile\n",
+			httpStubs: func(reg *httpmock.Registry) {
+				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
+			},
+		},
+		{
+			name: "include yml files",
+			opts: DiffOptions{
+				SelectorArg: "123",
+				UseColor:    false,
+				Include:     []string{"*.yml"},
+			},
+			wantFields: []string{"number"},
+			wantStdout: `diff --git a/.github/workflows/releases.yml b/.github/workflows/releases.yml
+index 73974448..b7fc0154 100644
+--- a/.github/workflows/releases.yml
++++ b/.github/workflows/releases.yml
+@@ -44,6 +44,11 @@ jobs:
+           token: ${{secrets.SITE_GITHUB_TOKEN}}
+       - name: Publish documentation site
+         if: "!contains(github.ref, '-')" # skip prereleases
++        env:
++          GIT_COMMITTER_NAME: cli automation
++          GIT_AUTHOR_NAME: cli automation
++          GIT_COMMITTER_EMAIL: noreply@github.com
++          GIT_AUTHOR_EMAIL: noreply@github.com
+         run: make site-publish
+       - name: Move project cards
+         if: "!contains(github.ref, '-')" # skip prereleases
+`,
+			httpStubs: func(reg *httpmock.Registry) {
+				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
+			},
+		},
+		{
+			name: "name only with include",
+			opts: DiffOptions{
+				SelectorArg: "123",
+				UseColor:    false,
+				NameOnly:    true,
+				Include:     []string{"*.yml"},
+			},
+			wantFields: []string{"number"},
+			wantStdout: ".github/workflows/releases.yml\n",
 			httpStubs: func(reg *httpmock.Registry) {
 				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
 			},
@@ -529,13 +593,15 @@ func Test_filterDiff(t *testing.T) {
 	rawDiff := fmt.Sprintf(testDiff, "", "", "", "")
 
 	tests := []struct {
-		name     string
-		patterns []string
-		want     string
+		name    string
+		input   string
+		include []string
+		exclude []string
+		want    string
 	}{
 		{
-			name:     "exclude yml files",
-			patterns: []string{"*.yml"},
+			name:    "exclude yml files",
+			exclude: []string{"*.yml"},
 			want: `diff --git a/Makefile b/Makefile
 index f2b4805c..3d7bd0f9 100644
 --- a/Makefile
@@ -554,8 +620,8 @@ index f2b4805c..3d7bd0f9 100644
 `,
 		},
 		{
-			name:     "exclude Makefile",
-			patterns: []string{"Makefile"},
+			name:    "exclude Makefile",
+			exclude: []string{"Makefile"},
 			want: `diff --git a/.github/workflows/releases.yml b/.github/workflows/releases.yml
 index 73974448..b7fc0154 100644
 --- a/.github/workflows/releases.yml
@@ -575,25 +641,131 @@ index 73974448..b7fc0154 100644
 `,
 		},
 		{
-			name:     "exclude all files",
-			patterns: []string{"*.yml", "Makefile"},
-			want:     "",
+			name:    "exclude all files",
+			exclude: []string{"*.yml", "Makefile"},
+			want:    "",
 		},
 		{
-			name:     "no matches",
-			patterns: []string{"*.go"},
-			want:     rawDiff,
+			name:    "no matches",
+			exclude: []string{"*.go"},
+			want:    rawDiff,
+		},
+		{
+			name:    "include yml files",
+			include: []string{"*.yml"},
+			want: `diff --git a/.github/workflows/releases.yml b/.github/workflows/releases.yml
+index 73974448..b7fc0154 100644
+--- a/.github/workflows/releases.yml
++++ b/.github/workflows/releases.yml
+@@ -44,6 +44,11 @@ jobs:
+           token: ${{secrets.SITE_GITHUB_TOKEN}}
+       - name: Publish documentation site
+         if: "!contains(github.ref, '-')" # skip prereleases
++        env:
++          GIT_COMMITTER_NAME: cli automation
++          GIT_AUTHOR_NAME: cli automation
++          GIT_COMMITTER_EMAIL: noreply@github.com
++          GIT_AUTHOR_EMAIL: noreply@github.com
+         run: make site-publish
+       - name: Move project cards
+         if: "!contains(github.ref, '-')" # skip prereleases
+`,
+		},
+		{
+			name:    "include no matches",
+			include: []string{"*.go"},
+			want:    "",
+		},
+		{
+			name:    "include all files",
+			include: []string{"*.yml", "Makefile"},
+			want:    rawDiff,
+		},
+		{
+			name:    "include with exclude",
+			include: []string{"*.yml", "Makefile"},
+			exclude: []string{"*.yml"},
+			want: `diff --git a/Makefile b/Makefile
+index f2b4805c..3d7bd0f9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -22,8 +22,8 @@ test:
+ 	go test ./...
+ .PHONY: test
+
+-site:
+-	git clone https://github.com/github/cli.github.com.git "$@"
++site: bin/gh
++	bin/gh repo clone github/cli.github.com "$@"
+
+ site-docs: site
+ 	git -C site pull
+`,
+		},
+		{
+			name: "include middle section from three files",
+			input: rawDiff + `diff --git a/pkg/main.py b/pkg/main.py
+index 1111111..2222222 100644
+--- a/pkg/main.py
++++ b/pkg/main.py
+@@ -1,2 +1,3 @@
+ import os
++import foo
+ print("hello")
+`,
+			include: []string{"Makefile"},
+			want: `diff --git a/Makefile b/Makefile
+index f2b4805c..3d7bd0f9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -22,8 +22,8 @@ test:
+ 	go test ./...
+ .PHONY: test
+
+-site:
+-	git clone https://github.com/github/cli.github.com.git "$@"
++site: bin/gh
++	bin/gh repo clone github/cli.github.com "$@"
+
+ site-docs: site
+ 	git -C site pull
+`,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reader, err := filterDiff(strings.NewReader(rawDiff), tt.patterns)
+			input := tt.input
+			if input == "" {
+				input = rawDiff
+			}
+			reader, err := filterDiff(strings.NewReader(input), tt.include, tt.exclude)
 			require.NoError(t, err)
 			got, err := io.ReadAll(reader)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, string(got))
 		})
 	}
+}
+
+func Test_splitDiffSections(t *testing.T) {
+	rawDiff := fmt.Sprintf(testDiff, "", "", "", "")
+	threeSections := rawDiff + `diff --git a/pkg/main.py b/pkg/main.py
+index 1111111..2222222 100644
+--- a/pkg/main.py
++++ b/pkg/main.py
+@@ -1,2 +1,3 @@
+ import os
++import foo
+ print("hello")
+`
+	sections := splitDiffSections(threeSections)
+	assert.Len(t, sections, 3)
+
+	var joined bytes.Buffer
+	for _, section := range sections {
+		joined.WriteString(section)
+	}
+	assert.Equal(t, threeSections, joined.String())
 }
 
 func Test_matchesAny(t *testing.T) {

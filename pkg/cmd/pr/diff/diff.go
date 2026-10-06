@@ -39,6 +39,7 @@ type DiffOptions struct {
 	NameOnly    bool
 	BrowserMode bool
 	Exclude     []string
+	Include     []string
 
 	AllowEscapeSequences bool
 }
@@ -63,9 +64,12 @@ func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Comman
 
 			With %[1]s--web%[1]s flag, open the pull request diff in a web browser instead.
 
-			Use %[1]s--exclude%[1]s to filter out files matching a glob pattern. The pattern
-			uses forward slashes as path separators on all platforms. You can repeat
-			the flag to exclude multiple patterns.
+			Use %[1]s--include%[1]s to restrict the diff to files matching a glob pattern,
+			and %[1]s--exclude%[1]s to filter out files matching a glob pattern. Patterns
+			use forward slashes as path separators on all platforms. You can repeat
+			the flags to supply multiple patterns. When both are given, a file must
+			match at least one include pattern and no exclude pattern to appear in
+			the diff.
 
 			By default, terminal escape sequences in the diff are neutralized, since
 			they could manipulate your terminal. Pass %[1]s--allow-escape-sequences%[1]s to
@@ -77,6 +81,9 @@ func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Comman
 
 			# See diff for a specific PR
 			$ gh pr diff 123
+
+			# Restrict the diff to matching files
+			$ gh pr diff --include '*.py'
 
 			# Exclude files from diff output
 			$ gh pr diff --exclude '*.yml' --exclude 'generated/*'
@@ -119,6 +126,7 @@ func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Comman
 	cmd.Flags().BoolVar(&opts.NameOnly, "name-only", false, "Display only names of changed files")
 	cmd.Flags().BoolVarP(&opts.BrowserMode, "web", "w", false, "Open the pull request diff in the browser")
 	cmd.Flags().StringSliceVarP(&opts.Exclude, "exclude", "e", nil, "Exclude files matching glob `patterns` from the diff")
+	cmd.Flags().StringSliceVarP(&opts.Include, "include", "i", nil, "Only include files matching glob `patterns` in the diff")
 	cmd.Flags().BoolVar(&opts.AllowEscapeSequences, "allow-escape-sequences", false, "Allow printing terminal escape sequences")
 
 	return cmd
@@ -163,8 +171,8 @@ func diffRun(opts *DiffOptions) error {
 	defer diffReadCloser.Close()
 
 	var diff io.Reader = diffReadCloser
-	if len(opts.Exclude) > 0 {
-		filtered, err := filterDiff(diff, opts.Exclude)
+	if len(opts.Include) > 0 || len(opts.Exclude) > 0 {
+		filtered, err := filterDiff(diff, opts.Include, opts.Exclude)
 		if err != nil {
 			return err
 		}
@@ -359,8 +367,10 @@ func sanitizedReader(r io.Reader) io.Reader {
 var diffHeaderRegexp = regexp.MustCompile(`(?:^|\n)diff\s--git.*\s("?)b/(.*)`)
 
 // filterDiff reads a unified diff and returns a new reader with file entries
-// matching any of the exclude patterns removed.
-func filterDiff(r io.Reader, excludePatterns []string) (io.Reader, error) {
+// filtered by the given patterns. A file entry is kept when it matches no
+// exclude pattern and, when include patterns are given, matches at least one
+// of them.
+func filterDiff(r io.Reader, includePatterns, excludePatterns []string) (io.Reader, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -369,8 +379,13 @@ func filterDiff(r io.Reader, excludePatterns []string) (io.Reader, error) {
 	var result bytes.Buffer
 	for _, section := range splitDiffSections(string(data)) {
 		name := extractFileName(section)
-		if name != "" && matchesAny(name, excludePatterns) {
-			continue
+		if name != "" {
+			if len(includePatterns) > 0 && !matchesAny(name, includePatterns) {
+				continue
+			}
+			if matchesAny(name, excludePatterns) {
+				continue
+			}
 		}
 		result.WriteString(section)
 	}
@@ -379,7 +394,9 @@ func filterDiff(r io.Reader, excludePatterns []string) (io.Reader, error) {
 
 // splitDiffSections splits a unified diff string into per-file sections.
 // Each section starts with "diff --git" and includes all content up to (but
-// not including) the next "diff --git" line.
+// not including) the next "diff --git" line. Non-final sections end with the
+// newline that separated them from the next section, so concatenating any
+// subset of sections yields a well-formed diff.
 func splitDiffSections(diff string) []string {
 	marker := "\ndiff --git "
 	parts := strings.Split(diff, marker)
@@ -388,11 +405,14 @@ func splitDiffSections(diff string) []string {
 	}
 	sections := make([]string, 0, len(parts))
 	for i, p := range parts {
-		if i == 0 {
+		switch {
+		case i == 0:
 			if len(p) > 0 {
 				sections = append(sections, p+"\n")
 			}
-		} else {
+		case i < len(parts)-1:
+			sections = append(sections, "diff --git "+p+"\n")
+		default:
 			sections = append(sections, "diff --git "+p)
 		}
 	}
